@@ -1,0 +1,88 @@
+#!/bin/bash
+# ============================================================================
+# sophia_train_ks.pbs -- Train PlaNet on KS on Sophia (1 A100 GPU)
+# ============================================================================
+
+#PBS -N ks_planet_ks_sophia
+#PBS -A PIGAN
+#PBS -q by-gpu
+#PBS -l select=1:ncpus=32:mem=64gb
+#PBS -l walltime=24:00:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_ks_sophia.pbs.out
+
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+REPO_DIR="${PROJ_DIR}/code"
+CODE_DIR="${REPO_DIR}/planet"
+SIF="${PROJ_DIR}/containers/ks-planet.sif"
+RUN_NAME="${RUN_NAME:-ks_run_sophia}"
+LOGDIR="${PROJ_DIR}/checkpoints/${RUN_NAME}"
+BACKUPDIR="${PROJ_DIR}/checkpoints/${RUN_NAME}_backup"
+MAX_STEPS="${MAX_STEPS:-2000000}"
+
+set -euo pipefail
+
+cd "${CODE_DIR}"
+mkdir -p "${PROJ_DIR}/logs" "${LOGDIR}" "${BACKUPDIR}"
+exec > >(tee -a "${PROJ_DIR}/logs/sophia_train_ks.out") 2>&1
+
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="http://proxy.alcf.anl.gov:3128"
+export http_proxy="${HTTP_PROXY}"
+export https_proxy="${HTTPS_PROXY}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+module use /soft/spack/base/0.7.1/install/modulefiles/Core/
+module load apptainer
+
+echo "============================================"
+echo "Job ID    : ${PBS_JOBID}"
+echo "Node      : $(hostname)"
+echo "GPU info  : $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
+echo "Repo dir  : ${REPO_DIR}"
+echo "Logdir    : ${LOGDIR}"
+echo "MAX_STEPS : ${MAX_STEPS}"
+echo "CUDA devs : ${CUDA_VISIBLE_DEVICES}"
+echo "Start     : $(date)"
+echo "============================================"
+
+if [ ! -f "${SIF}" ]; then
+    echo "ERROR: Container not found at ${SIF}"
+    exit 1
+fi
+
+apptainer exec --nv --bind "${PROJ_DIR}:${PROJ_DIR}" "${SIF}" python -c "
+import tensorflow as tf
+print('TF:', tf.__version__, 'GPU OK:', tf.test.is_gpu_available())
+"
+
+echo ""
+echo ">>> Starting KS training on Sophia..."
+apptainer exec --nv \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    --bind "${HOME}:${HOME}" \
+    --env http_proxy="${http_proxy}" \
+    --env https_proxy="${https_proxy}" \
+    --env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+    --env TF_CPP_MIN_LOG_LEVEL=2 \
+    "${SIF}" \
+    python -m planet.scripts.train \
+        --logdir "${LOGDIR}" \
+        --config ks_config \
+        --params "{tasks: [ks_chaos], max_steps: ${MAX_STEPS}, train_dir: ${CODE_DIR}/ks_dataset/train_episodes, test_dir: ${CODE_DIR}/ks_dataset/test_episodes}" \
+    2>&1 | tee "${PROJ_DIR}/logs/sophia_ks_train.log"
+
+echo ""
+echo ">>> Final checkpoint backup..."
+ts=$(date +%Y%m%d_%H%M%S)
+mkdir -p "${BACKUPDIR}/final_${ts}"
+if command -v rsync >/dev/null 2>&1; then
+    rsync -a "${LOGDIR}/" "${BACKUPDIR}/final_${ts}/"
+else
+    cp -a "${LOGDIR}/." "${BACKUPDIR}/final_${ts}/"
+fi
+echo "Backed up to ${BACKUPDIR}/final_${ts}/"
+echo "End: $(date)"

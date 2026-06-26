@@ -1,0 +1,108 @@
+#!/bin/bash
+# ============================================================================
+# 03_train_kolmogorov.pbs -- Train PlaNet on Kolmogorov 2D flow (1 node, 1 A100)
+# ============================================================================
+# If converter detected sequential trajectories, override at submit time:
+#     qsub -v BATCH=50,LEN=40,CTX=20,MAXLEN=51 03_train_kolmogorov.pbs
+# ============================================================================
+
+#PBS -N ks_planet_train_ko
+#PBS -A PIGAN
+#PBS -q preemptable
+#PBS -r y
+#PBS -l select=1:system=polaris
+#PBS -l walltime=24:00:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_train_kolmogorov.pbs.out
+
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+REPO_DIR="${PROJ_DIR}/code"
+CODE_DIR="${REPO_DIR}/planet"
+SIF="${PROJ_DIR}/containers/ks-planet.sif"
+LOGDIR="${PROJ_DIR}/checkpoints/kolmogorov_run"
+BACKUPDIR="${PROJ_DIR}/checkpoints/kolmogorov_run_backup"
+MAX_STEPS="${MAX_STEPS:-2000000}"
+BATCH="${BATCH:-64}"
+LEN="${LEN:-2}"
+CTX="${CTX:-1}"
+MAXLEN="${MAXLEN:-2}"
+
+set -euo pipefail
+
+cd "${CODE_DIR}"
+mkdir -p "${PROJ_DIR}/logs"
+exec > >(tee -a "${PROJ_DIR}/logs/train_kolmogorov.out") 2>&1
+
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="http://proxy.alcf.anl.gov:3128"
+export http_proxy="${HTTP_PROXY}"
+export https_proxy="${HTTPS_PROXY}"
+
+ml use /soft/modulefiles
+ml spack-pe-base
+ml apptainer
+
+export BASE_SCRATCH_DIR=/local/scratch
+export APPTAINER_TMPDIR=${BASE_SCRATCH_DIR}/apptainer-tmpdir
+mkdir -p ${APPTAINER_TMPDIR} "${LOGDIR}" "${BACKUPDIR}"
+
+echo "============================================"
+echo "Job ID    : ${PBS_JOBID}"
+echo "Node      : $(hostname)"
+echo "GPU info  : $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
+echo "Repo dir  : ${REPO_DIR}"
+echo "Config    : batch=${BATCH}  len=${LEN}  ctx=${CTX}  maxlen=${MAXLEN}"
+echo "Logdir    : ${LOGDIR}"
+echo "Start     : $(date)"
+echo "============================================"
+
+# Periodic backup
+(
+    while true; do
+        sleep 1800
+        if [ -d "${LOGDIR}" ]; then
+            ts=$(date +%Y%m%d_%H%M%S)
+            rsync -a --delete "${LOGDIR}/" "${BACKUPDIR}/snapshot_${ts}/" 2>/dev/null || true
+            ls -1dt "${BACKUPDIR}/snapshot_"* 2>/dev/null | tail -n +4 | xargs rm -rf 2>/dev/null || true
+        fi
+    done
+) &
+BACKUP_PID=$!
+trap "kill ${BACKUP_PID} 2>/dev/null" EXIT
+
+# Lib check
+echo ""
+echo ">>> Library check..."
+apptainer exec --nv --bind "${PROJ_DIR}:${PROJ_DIR}" "${SIF}" python -c "
+import tensorflow as tf, tensorflow_probability
+print(f'  TF: {tf.__version__}, GPU OK: {tf.test.is_gpu_available()}')
+"
+
+# Training
+echo ""
+echo ">>> Starting Kolmogorov training..."
+apptainer exec --nv \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    --bind "${HOME}:${HOME}" \
+    --env http_proxy="${http_proxy}" \
+    --env https_proxy="${https_proxy}" \
+    --env TF_CPP_MIN_LOG_LEVEL=2 \
+    "${SIF}" \
+    python -m planet.scripts.train \
+        --logdir "${LOGDIR}" \
+        --config kolmogorov_config \
+        --params "{tasks: [kolmogorov_flow], batch_shape: [${BATCH}, ${LEN}], open_loop_context: ${CTX}, max_length: ${MAXLEN}, max_steps: ${MAX_STEPS}, train_dir: ${CODE_DIR}/ks_dataset/kolmogorov_train_episodes, test_dir: ${CODE_DIR}/ks_dataset/kolmogorov_test_episodes, val_dir: ${CODE_DIR}/ks_dataset/kolmogorov_val_episodes}" \
+    2>&1 | tee "${PROJ_DIR}/logs/kolmogorov_train.log"
+
+# Final backup
+echo ""
+echo ">>> Final checkpoint backup..."
+ts=$(date +%Y%m%d_%H%M%S)
+rsync -a "${LOGDIR}/" "${BACKUPDIR}/final_${ts}/"
+echo "  Backed up to ${BACKUPDIR}/final_${ts}/"
+
+echo ""
+echo "End: $(date)"

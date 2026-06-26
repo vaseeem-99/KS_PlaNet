@@ -1,0 +1,47 @@
+#!/bin/bash
+#PBS -N ks_planet_ko_eval
+#PBS -A PIGAN
+#PBS -q by-gpu
+#PBS -l select=1:ncpus=16:mem=32gb
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_ko_eval.pbs.out
+
+set -euo pipefail
+
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+REPO_DIR="${PROJ_DIR}/code"
+CODE_DIR="${REPO_DIR}/planet"
+SIF="${PROJ_DIR}/containers/ks-planet.sif"
+RUN_NAME="${RUN_NAME:-kolmogorov_run_sophia_full}"
+LOGDIR="${PROJ_DIR}/checkpoints/${RUN_NAME}"
+OUTPUT_DIR="${PROJ_DIR}/figures/${RUN_NAME}"
+
+mkdir -p "${PROJ_DIR}/logs" "${OUTPUT_DIR}"
+exec > >(tee -a "${PROJ_DIR}/logs/sophia_evaluate_kolmogorov.out") 2>&1
+cd "${CODE_DIR}"
+
+module use /soft/spack/base/0.7.1/install/modulefiles/Core/
+module load apptainer
+
+echo "Evaluating ${RUN_NAME} on $(hostname) at $(date)"
+apptainer exec --nv --bind "${PROJ_DIR}:${PROJ_DIR}" "${SIF}" \
+  python -m planet.scripts.evaluate_pde_rollouts \
+    --logdir "${LOGDIR}" \
+    --episode-dir "${CODE_DIR}/ks_dataset/kolmogorov_test_episodes" \
+    --output "${OUTPUT_DIR}/kolmogorov_rollout.npz" \
+    --config kolmogorov_config --context 1 --episode-index 0
+
+apptainer exec --nv --bind "${PROJ_DIR}:${PROJ_DIR}" "${SIF}" \
+  python -m planet.scripts.plot_latent_dynamics \
+    --rollout "${OUTPUT_DIR}/kolmogorov_rollout.npz" --output-dir "${OUTPUT_DIR}/plots"
+
+apptainer exec --nv --bind "${PROJ_DIR}:${PROJ_DIR}" "${SIF}" \
+  python -m planet.scripts.plot_pde_rollout_metrics \
+    --rollout "${OUTPUT_DIR}/kolmogorov_rollout.npz" --output-dir "${OUTPUT_DIR}/plots" \
+    --dataset kolmogorov
+
+echo "Evaluation complete: ${OUTPUT_DIR}"

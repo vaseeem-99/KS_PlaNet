@@ -1,0 +1,47 @@
+#!/bin/bash
+# ============================================================================
+# sophia_backup.pbs -- Archive Sophia PlaNet checkpoints, logs, and figures
+# ============================================================================
+
+#PBS -N ks_planet_backup_sophia
+#PBS -A PIGAN
+#PBS -q by-gpu
+#PBS -l select=1:ncpus=16:mem=32gb
+#PBS -l walltime=00:30:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_backup_sophia.pbs.out
+
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+ARCHIVE_DIR="${PROJ_DIR}/archives"
+TS=$(date +%Y%m%d_%H%M%S)
+ARCHIVE="${ARCHIVE_DIR}/ks_planet_sophia_${TS}.tar.gz"
+
+set -euo pipefail
+
+mkdir -p "${ARCHIVE_DIR}" "${PROJ_DIR}/logs"
+exec > >(tee -a "${PROJ_DIR}/logs/sophia_backup.out") 2>&1
+cd "${PROJ_DIR}"
+
+echo "============================================"
+echo "Job ID  : ${PBS_JOBID}"
+echo "Archive : ${ARCHIVE}"
+echo "Start   : $(date)"
+echo "============================================"
+
+ITEMS=(logs/ figures/ code/planet/ks_dataset/figures/)
+for d in checkpoints/*sophia*; do
+    [ -e "$d" ] && ITEMS+=("$d")
+done
+
+tar -czf "${ARCHIVE}" \
+    --exclude='*.tfevents.tmp*' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    -C "${PROJ_DIR}" \
+    "${ITEMS[@]}"
+
+ls -lh "${ARCHIVE}"
+echo "End: $(date)"

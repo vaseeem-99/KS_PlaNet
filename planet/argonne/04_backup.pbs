@@ -1,0 +1,94 @@
+#!/bin/bash
+# ============================================================================
+# 04_backup.pbs -- Tar up checkpoints + logs into a single archive
+# ============================================================================
+# Run AFTER training finishes (or partway through if you want to pull a
+# snapshot). Outputs a single .tar.gz to /eagle that you can rsync from
+# your laptop in one shot.
+#
+# Submit:    qsub 04_backup.pbs
+# Submit chained after training:
+#            qsub -W depend=afterok:<train_jobid> 04_backup.pbs
+# ============================================================================
+
+#PBS -N ks_planet_backup
+#PBS -A PIGAN
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=00:30:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_backup.pbs.out
+
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+REPO_DIR="${PROJ_DIR}/code"
+CODE_DIR="${REPO_DIR}/planet"
+ARCHIVE_DIR="${PROJ_DIR}/archives"
+TS=$(date +%Y%m%d_%H%M%S)
+ARCHIVE="${ARCHIVE_DIR}/ks_planet_${TS}.tar.gz"
+
+set -e
+
+mkdir -p "${ARCHIVE_DIR}" "${PROJ_DIR}/logs"
+exec > >(tee -a "${PROJ_DIR}/logs/backup.out") 2>&1
+cd "${PROJ_DIR}"
+
+echo "============================================"
+echo "Job ID    : ${PBS_JOBID}"
+echo "Archive   : ${ARCHIVE}"
+echo "Repo dir  : ${REPO_DIR}"
+echo "Start     : $(date)"
+echo "============================================"
+
+# ── Disk-usage report before archiving ──────────────────────────────────────
+echo ""
+echo ">>> Disk usage of items to be archived:"
+du -sh checkpoints/ks_run                 2>/dev/null || echo "  (no ks_run)"
+du -sh checkpoints/kolmogorov_run         2>/dev/null || echo "  (no kolmogorov_run)"
+du -sh checkpoints/ks_run_backup          2>/dev/null || echo "  (no ks_run_backup)"
+du -sh checkpoints/kolmogorov_run_backup  2>/dev/null || echo "  (no kolmogorov_run_backup)"
+du -sh logs/                              2>/dev/null
+du -sh "${CODE_DIR}/ks_dataset/figures"    2>/dev/null || echo "  (no figures dir yet)"
+
+# Build the tar.
+echo ""
+echo ">>> Building archive (this can take a while for large checkpoints)..."
+
+tar -czf "${ARCHIVE}" \
+    --exclude='*.tfevents.tmp*' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    -C "${PROJ_DIR}" \
+    checkpoints/ \
+    logs/ \
+    figures/ \
+    code/planet/ks_dataset/figures/
+
+# ── Final summary + a manifest you can grep on the laptop side ──────────────
+echo ""
+echo ">>> Manifest (also written into the archive next time as MANIFEST.txt):"
+ls -lh "${ARCHIVE}"
+echo ""
+echo ">>> Top 20 largest files in the archive:"
+tar -tzvf "${ARCHIVE}" | sort -k3 -n -r | head -20
+
+# ── Keep only the 3 most recent archives ────────────────────────────────────
+ls -1t "${ARCHIVE_DIR}"/ks_planet_*.tar.gz 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+
+echo ""
+echo "============================================"
+echo "Backup complete."
+echo "============================================"
+echo ""
+echo "To pull this to your laptop:"
+echo ""
+echo "  rsync -avzP \\"
+echo "      ${USER}@polaris.alcf.anl.gov:${ARCHIVE} \\"
+echo "      ~/ks_planet_results/"
+echo ""
+echo "Then locally:"
+echo "  cd ~/ks_planet_results"
+echo "  tar -xzf $(basename ${ARCHIVE})"
+echo "End: $(date)"

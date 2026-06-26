@@ -1,0 +1,123 @@
+#!/bin/bash
+# ============================================================================
+# 00_setup_polaris.pbs -- Build the Apptainer .sif on a Polaris compute node
+# ============================================================================
+# Why a PBS job: per ALCF docs, container builds must happen on COMPUTE nodes,
+# not login nodes. This script grabs a debug node, pulls the NGC TF1 image,
+# adds PlaNet deps via an Apptainer definition file, and saves the .sif to
+# /eagle.
+#
+# Submit with:    qsub 00_setup_polaris.pbs
+# Watch:          qstat -u $USER
+# Logs:           tail -f /eagle/projects/PIGAN/$USER/ks_planet/logs/setup.out
+#
+# Run ONCE per project setup. Takes ~30 min (mostly container pull).
+# ============================================================================
+
+#PBS -N ks_planet_setup
+#PBS -A PIGAN
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -l singularity_fakeroot=true
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_setup.pbs.out
+
+# ── Paths (edit USER if needed) ─────────────────────────────────────────────
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+REPO_DIR="${PROJ_DIR}/code"
+CODE_DIR="${REPO_DIR}/planet"
+DEF_FILE="${CODE_DIR}/argonne/ks_planet.def"
+SIF="${PROJ_DIR}/containers/ks-planet.sif"
+# ────────────────────────────────────────────────────────────────────────────
+
+set -e
+
+# Create directory tree
+mkdir -p "${PROJ_DIR}"/{code,containers,logs,checkpoints}
+exec > >(tee -a "${PROJ_DIR}/logs/setup.out") 2>&1
+
+# Proxy for internet access
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="http://proxy.alcf.anl.gov:3128"
+export http_proxy="http://proxy.alcf.anl.gov:3128"
+export https_proxy="http://proxy.alcf.anl.gov:3128"
+
+# Load Apptainer (per ALCF docs)
+ml use /soft/modulefiles
+ml spack-pe-base
+ml apptainer
+
+# Apptainer cache/tmp on node-local SSD (faster, doesn't fill /home)
+export BASE_SCRATCH_DIR=/local/scratch
+export APPTAINER_TMPDIR=${BASE_SCRATCH_DIR}/apptainer-tmpdir
+export APPTAINER_CACHEDIR=${BASE_SCRATCH_DIR}/apptainer-cachedir
+mkdir -p ${APPTAINER_TMPDIR} ${APPTAINER_CACHEDIR}
+
+echo "============================================"
+echo "Apptainer version: $(apptainer version)"
+echo "Node            : $(hostname)"
+echo "Repo dir        : ${REPO_DIR}"
+echo "Code dir        : ${CODE_DIR}"
+echo "Definition file : ${DEF_FILE}"
+echo "Container path  : ${SIF}"
+echo "============================================"
+
+# Check the Apptainer definition is uploaded
+if [ ! -f "${DEF_FILE}" ]; then
+    echo "ERROR: Apptainer definition not found at ${DEF_FILE}"
+    echo "Upload the planet/ repo to ${CODE_DIR} first."
+    exit 1
+fi
+
+# Build the SIF from the Apptainer definition.
+# This pulls the NGC base + adds PlaNet pip deps in one step.
+cd "${REPO_DIR}"
+
+if [ -f "${SIF}" ]; then
+    echo "Container ${SIF} already exists. Delete it to rebuild."
+else
+    echo ""
+    echo ">>> Building Apptainer image (~30 min, ~5 GB)..."
+    apptainer build --fakeroot "${SIF}" "${DEF_FILE}"
+    echo ">>> Build complete."
+fi
+
+# Verify the container can import PlaNet's key deps
+echo ""
+echo ">>> Verifying container Python environment..."
+apptainer exec "${SIF}" python -c "
+import tensorflow as tf
+import tensorflow_probability as tfp
+import gym, numpy, scipy
+from ruamel import yaml
+print('  TensorFlow            :', tf.__version__)
+print('  TF Probability        :', tfp.__version__)
+print('  numpy                 :', numpy.__version__)
+print('  scipy                 :', scipy.__version__)
+print('  gym                   :', gym.__version__)
+print('  GPU available         :', tf.test.is_gpu_available())
+"
+
+# Install the planet package itself (editable, into /home so it persists)
+echo ""
+echo ">>> Installing PlaNet code into container's pip path..."
+apptainer exec \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    "${SIF}" \
+    pip install --user -e "${REPO_DIR}"
+
+echo ""
+echo "============================================"
+echo "Setup complete."
+echo "  SIF      : ${SIF}"
+echo "  Size     : $(du -sh ${SIF} | cut -f1)"
+echo "============================================"
+echo ""
+echo "Next:"
+echo "  qsub argonne/01_convert.pbs"
+echo "  qsub argonne/02_train_ks.pbs"
+echo "  qsub argonne/03_train_kolmogorov.pbs"

@@ -1,0 +1,142 @@
+#!/bin/bash
+# ============================================================================
+# 01_convert.pbs -- Run both data converters on a Polaris compute node
+# ============================================================================
+# CPU-bound work (~30 min total). debug queue is free and fast for this.
+# Data + outputs live OUTSIDE the container, bind-mounted from /eagle.
+# ============================================================================
+
+#PBS -N ks_planet_convert
+#PBS -A PIGAN
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -o ks_planet_convert.pbs.out
+
+PROJECT="PIGAN"
+PROJ_DIR="/eagle/projects/${PROJECT}/${USER}/ks_planet"
+REPO_DIR="${PROJ_DIR}/code"
+CODE_DIR="${REPO_DIR}/planet"
+SIF="${PROJ_DIR}/containers/ks-planet.sif"
+
+set -euo pipefail
+
+cd "${CODE_DIR}"
+mkdir -p "${PROJ_DIR}/logs"
+exec > >(tee -a "${PROJ_DIR}/logs/convert.out") 2>&1
+
+# Proxy for package/container access if needed
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="http://proxy.alcf.anl.gov:3128"
+export http_proxy="${HTTP_PROXY}"
+export https_proxy="${HTTPS_PROXY}"
+
+# Load Apptainer
+ml use /soft/modulefiles
+ml spack-pe-base
+ml apptainer
+
+export BASE_SCRATCH_DIR=/local/scratch
+export APPTAINER_TMPDIR=${BASE_SCRATCH_DIR}/apptainer-tmpdir
+mkdir -p ${APPTAINER_TMPDIR}
+
+echo "============================================"
+echo "Job ID        : ${PBS_JOBID}"
+echo "Node          : $(hostname)"
+echo "Container     : ${SIF}"
+echo "Repo dir      : ${REPO_DIR}"
+echo "Data location : ${CODE_DIR}/ks_dataset/  (bind-mounted, OUTSIDE container)"
+echo "Start         : $(date)"
+echo "============================================"
+
+# Sanity-check the container
+if [ ! -f "${SIF}" ]; then
+    echo "ERROR: Container not built. Run qsub 00_setup_polaris.pbs first."
+    exit 1
+fi
+
+# ── Pre-flight: verify libs available inside container ─────────────────────
+echo ""
+echo ">>> Library check inside container..."
+apptainer exec --bind "${PROJ_DIR}:${PROJ_DIR}" "${SIF}" python -c "
+import sys
+required = ['tensorflow', 'tensorflow_probability', 'numpy', 'scipy',
+            'matplotlib', 'gym']
+missing = []
+for m in required:
+    try:
+        __import__(m)
+        print(f'  OK: {m}')
+    except ImportError as e:
+        missing.append(m)
+        print(f'  MISSING: {m}  ({e})')
+if missing:
+    print(f'Missing: {missing}')
+    sys.exit(1)
+" || { echo "Container missing deps -- rebuild with 00_setup_polaris.pbs"; exit 1; }
+
+# ── KS conversion ───────────────────────────────────────────────────────────
+echo ""
+echo ">>> KS conversion (~10 min)"
+apptainer exec \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    --bind "${HOME}:${HOME}" \
+    --env http_proxy="${http_proxy}" \
+    --env https_proxy="${https_proxy}" \
+    "${SIF}" \
+    python "${CODE_DIR}/ks_scripts/convert_ks_to_planet.py" \
+    2>&1 | tee "${PROJ_DIR}/logs/ks_convert.log"
+
+# ── Kolmogorov conversion ───────────────────────────────────────────────────
+echo ""
+echo ">>> Kolmogorov conversion (~20 min for 20k pairs)"
+apptainer exec \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    --bind "${HOME}:${HOME}" \
+    --env http_proxy="${http_proxy}" \
+    --env https_proxy="${https_proxy}" \
+    "${SIF}" \
+    python "${CODE_DIR}/ks_scripts/convert_kolmogorov_to_planet.py" \
+    2>&1 | tee "${PROJ_DIR}/logs/kolmogorov_convert.log"
+
+# ── Outputs ─────────────────────────────────────────────────────────────────
+echo ""
+echo ">>> Output summary (all OUTSIDE container, in ${CODE_DIR}/ks_dataset/):"
+for d in train_episodes test_episodes \
+         kolmogorov_train_episodes kolmogorov_val_episodes kolmogorov_test_episodes; do
+    n=$(ls -1 "${CODE_DIR}/ks_dataset/${d}/" 2>/dev/null | wc -l)
+    sz=$(du -sh "${CODE_DIR}/ks_dataset/${d}/" 2>/dev/null | cut -f1)
+    echo "    ${d:35s}  ${n} files  ${sz}"
+done
+
+echo ""
+echo ">>> Converted image previews:"
+find "${CODE_DIR}/ks_dataset/figures" -maxdepth 2 -type f -name '*.png' | sort || true
+
+echo ""
+echo ">>> Converted episode diagnostic plots..."
+apptainer exec \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    "${SIF}" \
+    python "${CODE_DIR}/scripts/plot_episode_diagnostics.py" \
+        --dataset ks \
+        --data-dir "${CODE_DIR}/ks_dataset" \
+        --outdir "${CODE_DIR}/ks_dataset/figures/ks_diagnostics" \
+    2>&1 | tee "${PROJ_DIR}/logs/ks_diagnostics.log"
+
+apptainer exec \
+    --bind "${PROJ_DIR}:${PROJ_DIR}" \
+    "${SIF}" \
+    python "${CODE_DIR}/scripts/plot_episode_diagnostics.py" \
+        --dataset kolmogorov \
+        --data-dir "${CODE_DIR}/ks_dataset" \
+        --outdir "${CODE_DIR}/ks_dataset/figures/kolmogorov_diagnostics" \
+    2>&1 | tee "${PROJ_DIR}/logs/kolmogorov_diagnostics.log"
+
+find "${CODE_DIR}/ks_dataset/figures" -maxdepth 3 -type f -name '*.png' | sort || true
+
+echo ""
+echo "End: $(date)"
