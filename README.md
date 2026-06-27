@@ -211,39 +211,6 @@ python -m planet.scripts.train \
 
 ---
 
-## Step 4 — Monitor in W&B
-
-All runs go to **[wandb.ai/Physics_Sim/KS_PlaNet](https://wandb.ai/Physics_Sim/KS_PlaNet)**.
-
-Filter by tag to separate the two experiments:
-- Tag `ks` — KS conversion + training
-- Tag `kolmogorov` — Kolmogorov conversion + training
-- Tag `data_conversion` — both converters
-- Tag `training` — both training runs
-
-### Run names
-
-| Run | Tag | Source |
-|-----|-----|--------|
-| `ks_data_conversion` | ks | KS converter |
-| `kolmogorov_data_conversion` | kolmogorov | Kolmogorov converter |
-| `ks_planet_ks_run` | ks | KS training |
-| `ks_planet_kolmogorov_run` | kolmogorov | Kolmogorov training |
-
-### Scalars to watch
-
-For both training runs the W&B logger parses TF Summary protobuf bytes and extracts every scalar tag. The interesting ones:
-
-- `train/objectives_image` — image reconstruction log-likelihood (rising)
-- `train/objectives_divergence` — KL(posterior ∥ prior) (falls then stabilises)
-- `train/closedloop_state_posterior_entropy` — should be lower than prior entropy
-- `train/closedloop_state_prior_entropy`
-- `train/dist_summaries_image_abs_error` — mean pixel error (falling)
-- `test/mean_score` — open-loop prediction score
-- `train/general_steps_per_second` — throughput
-
----
-
 ## How the Data Flows
 
 **KS path:**
@@ -286,25 +253,6 @@ Both paths share the same RSSM cell, encoder, decoder, optimizer, and W&B loggin
 
 ---
 
-## Troubleshooting
-
-**`ModuleNotFoundError: No module named 'tensorflow'`**
-→ Python 3.8+. TF 1.13 requires Python 3.6 or 3.7.
-
-**Converter crashes with `OSError: [Errno 12] Cannot allocate memory`**
-→ Reduce `workers` at the top of the converter script.
-
-**Kolmogorov training reports `InvalidArgumentError: batch_shape mismatch`**
-→ You used `ks_config` defaults on Kolmogorov data, or vice versa. Match the chunk length to your episode length: 2 for pairs, 51 for rebuilt trajectories, 40 for KS.
-
-**W&B says `wandb: ERROR Run initialization has timed out`**
-→ Confirm `wandb login` was run, or set `WANDB_MODE=offline` to log locally.
-
-**Kolmogorov spectrum looks identical to KS**
-→ Make sure you ran `visualize_both.py` (not `visualize_ks.py`) and that both source files load correctly.
-
----
-
 ## Research Direction
 
 The two datasets together let you investigate three research questions:
@@ -315,15 +263,6 @@ The two datasets together let you investigate three research questions:
 
 3. **Comparison to non-latent baselines.** PDE-Refiner reports 98 seconds of stable KS rollout at the same dataset configuration; LNS reports specific accuracy numbers on Kolmogorov at the same 64×64 setup. Both are public benchmarks for your latent approach to beat.
 
----
-
-## References
-
-- Hafner et al. (2019). *Learning Latent Dynamics for Planning from Pixels*. ICML. [arXiv:1811.04551](https://arxiv.org/abs/1811.04551)
-- Lippe et al. (2023). *PDE-Refiner*. NeurIPS. [arXiv:2308.05732](https://arxiv.org/abs/2308.05732)
-- Li et al. (2025). *Latent Neural PDE Solver*. JCP 524:113705.
-- Bülte et al. (2025). *Probabilistic Neural Operators*. arXiv:2502.12902.
-- Original PlaNet code: https://github.com/google-research/planet
 
 ---
 
